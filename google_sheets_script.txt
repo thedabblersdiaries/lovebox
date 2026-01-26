@@ -1,0 +1,23 @@
+function onNewMessage() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1"); // change Sheet1 to your sheet name
+  var data = sheet.getDataRange().getValues(); // get all rows
+
+  var emailAddress = "youemail@example.com"; // your email
+
+  for (var i = 1; i < data.length; i++) { // skip header row
+    var row = data[i];
+    var message = row[0]; // Column A = message
+    var seen = row[1];    // Column B = Seen
+    var timestamp = row[2]; // Column C = Timestamp (optional)
+
+    if (seen === 0) { // only send if unseen
+      // Send email
+      var subject = "New Lovebox Message!";
+      var body = "You have a new message:\n\n" + message + "\n\nTimestamp: " + timestamp;
+      MailApp.sendEmail(emailAddress, subject, body);
+
+      // Mark as seen
+      sheet.getRange(i + 1, 2).setValue(1); // i+1 because rows are 1-indexed in Sheets
+    }
+  }
+}
