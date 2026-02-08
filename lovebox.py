@@ -1,181 +1,193 @@
-import tkinter as tk
+#!/usr/bin/env python3
+
+import time
+import signal
+import sys
+import LCD1602
+import RPi.GPIO as GPIO
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
-import pygame
 
-# ================== CONFIG ==================
-SCREEN_W = 320
-SCREEN_H = 240
+# ================= GPIO =================
+LED_PIN = 17
+BUTTON_PIN = 18
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
-          "https://www.googleapis.com/auth/drive"]
-# ============================================
+LED_ON = GPIO.LOW
+LED_OFF = GPIO.HIGH
+BUTTON_PRESSED = GPIO.LOW
+BUTTON_RELEASED = GPIO.HIGH
 
-# ---------- Audio ----------
-pygame.mixer.init()
-pygame.mixer.music.load("ringtone.mp3")
-pygame.mixer.music.set_volume(0.4)
+# ================= LCD =================
+LCD_ADDR = 0x27
+MAX_CHAR_PER_LINE = 16
+PAGE_DISPLAY_TIME = 2.0
+PAGE_GAP_TIME = 0.6
 
-# ---------- Google ----------
-creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+# ================= Google Sheets =================
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+creds = Credentials.from_service_account_file(
+    "credentials.json", scopes=SCOPES
+)
 gclient = gspread.authorize(creds)
-
-# Sheet for messages to display
 msg_sheet = gclient.open("Lovebox").sheet1
 
-# Sheet where users submit new messages
-inbox_sheet = gclient.open("Lovebox_Inbox").sheet1
-
-# ---------- Tk ----------
-root = tk.Tk()
-root.attributes("-fullscreen", True)
-root.configure(bg="black")
-
-canvas = tk.Canvas(root, width=SCREEN_W, height=SCREEN_H - 60, bg="black", highlightthickness=0)
-canvas.pack()
-
-btn_frame = tk.Frame(root, bg="black")
-btn_frame.pack(fill="x")
-
-# ---------- State ----------
+# ================= State =================
 messages = []
 current_index = 0
-polling_active = False
+page_index = 0
 
-# ---------- Message Logic ----------
+last_poll_time = 0
+POLL_INTERVAL = 30
+
+# ================= Setup =================
+def setup():
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+
+    GPIO.setup(LED_PIN, GPIO.OUT)
+    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    GPIO.output(LED_PIN, LED_OFF)
+
+    LCD1602.init(LCD_ADDR, 1)
+    LCD1602.clear()
+
+# ================= Message Logic =================
 def load_messages():
-    global messages, current_index
+    global messages, current_index, page_index
     rows = msg_sheet.get_all_records()
-    messages = [(i + 2, row["Content"]) for i, row in enumerate(rows) if row.get("Seen") == 0]
-    current_index = 0
-
-def display_message():
-    canvas.delete("all")
-
-    if messages:
-        next_btn.config(state="normal")
-    else:
-        next_btn.config(state="disabled")
-
-    if not messages:
-        canvas.create_text(
-            SCREEN_W // 2,
-            (SCREEN_H - 60) // 2,
-            text="No messages\nright now!",
-            fill="white",
-            font=("Arial", 18),
-            justify="center"
-        )
-        start_polling()
-        return
-
-    _, content = messages[current_index]
-    canvas.create_text(
-        SCREEN_W // 2,
-        (SCREEN_H - 60) // 2,
-        text=content,
-        fill="white",
-        font=("Arial", 18),
-        width=SCREEN_W - 20,
-        justify="center"
-    )
-
-def next_message():
-    global current_index
-    if messages:
-        row, _ = messages[current_index]
-        msg_sheet.update_cell(row, 3, 1)  # mark Seen = 1
-
-    current_index += 1
-    if current_index >= len(messages):
-        messages.clear()
-        pygame.mixer.music.stop()
-
-    display_message()
-
-# ---------- Polling ----------
-def start_polling():
-    global polling_active
-    if not polling_active:
-        polling_active = True
-        root.after(30000, poll_for_messages)
-
-def poll_for_messages():
-    global polling_active
-    load_messages()
-
-    if messages:
-        polling_active = False
-        display_message()
-        play_ringtone()
-    else:
-        root.after(30000, poll_for_messages)
-
-# ---------- Ringtone ----------
-def play_ringtone():
-    if messages and not pygame.mixer.music.get_busy():
-        pygame.mixer.music.play()
-    if messages:
-        root.after(30000, play_ringtone)
-
-# ---------- Text Input with Virtual Keyboard ----------
-def open_text_input():
-    win = tk.Toplevel(root)
-    win.attributes("-fullscreen", True)
-    win.configure(bg="black")
-
-    tk.Label(win, text="Write your message:", font=("Arial", 16), bg="black", fg="white").pack(pady=5)
-    entry = tk.Text(win, height=3, width=25, font=("Arial", 14))
-    entry.pack(pady=5)
-
-    # ----- Virtual Keyboard -----
-    keys = [
-        "QWERTYUIOP",
-        "ASDFGHJKL",
-        "ZXCVBNM",
-        "1234567890",
-        " .,!?@#"
+    messages = [
+        (i + 2, row["Content"])
+        for i, row in enumerate(rows)
+        if row.get("Seen") == 0
     ]
 
-    def add_to_entry(char):
-        entry.insert(tk.END, char)
+    if not messages:
+        current_index = 0
+        page_index = 0
+    else:
+        current_index = min(current_index, len(messages) - 1)
+        page_index = 0
 
-    keyboard_frame = tk.Frame(win, bg="gray")
-    keyboard_frame.pack()
+def break_message(msg):
+    words = msg.split()
+    lines = []
+    current = ""
 
-    for row in keys:
-        row_frame = tk.Frame(keyboard_frame, bg="gray")
-        row_frame.pack()
-        for char in row:
-            tk.Button(
-                row_frame, text=char, width=3, height=2,
-                command=lambda c=char: add_to_entry(c)
-            ).pack(side="left", padx=1, pady=1)
+    for word in words:
+        if len(current) + len(word) + (1 if current else 0) > MAX_CHAR_PER_LINE:
+            lines.append(current)
+            current = word
+        else:
+            current = word if not current else f"{current} {word}"
 
-    # Backspace
-    tk.Button(keyboard_frame, text="⌫", width=3, height=2, command=lambda: entry.delete("end-2c", tk.END)).pack(pady=2)
+    if current:
+        lines.append(current)
 
-    # Send button
-    def send_text():
-        text = entry.get("1.0", "end").strip()
-        if text:
-            inbox_sheet.append_row([text, 0, datetime.now().isoformat()])
-        win.destroy()
+    return lines
 
-    control = tk.Frame(win, bg="black")
-    control.pack(fill="x", pady=5)
-    tk.Button(control, text="Send ❤️", font=("Arial", 14), command=send_text).pack(side="left", expand=True, fill="x")
-    tk.Button(control, text="Back", font=("Arial", 14), command=win.destroy).pack(side="right", expand=True, fill="x")
+# ================= LCD Helpers =================
+def lcd_write_centered(row, text):
+    LCD1602.write(0, row, text.center(16)[:16])
 
-# ---------- Buttons ----------
-next_btn = tk.Button(btn_frame, text="Next", font=("Arial", 16), command=next_message)
-next_btn.pack(side="left", expand=True, fill="x")
+# ================= Display =================
+def show_next_page():
+    global page_index
 
-write_btn = tk.Button(btn_frame, text="Write Message ✏️", font=("Arial", 16), command=open_text_input)
-write_btn.pack(side="right", expand=True, fill="x")
+    LCD1602.clear()
 
-# ---------- Start ----------
-load_messages()
-display_message()
-root.mainloop()
+    if not messages:
+        GPIO.output(LED_PIN, LED_OFF)
+        lcd_write_centered(0, "No messages")
+        lcd_write_centered(1, "right now!")
+        return
+
+    GPIO.output(LED_PIN, LED_ON)
+
+    _, text = messages[current_index]
+    lines = break_message(text)
+
+    i = page_index * 2
+
+    lcd_write_centered(0, lines[i])
+    if i + 1 < len(lines):
+        lcd_write_centered(1, lines[i + 1])
+
+    page_index += 1
+    if page_index * 2 >= len(lines):
+        page_index = 0  # loop message
+
+# ================= Button =================
+def next_message():
+    global current_index, page_index
+
+    if not messages:
+        return
+
+    row, _ = messages[current_index]
+    msg_sheet.update_cell(row, 3, 1)  # Seen = 1
+
+    current_index += 1
+    page_index = 0
+
+    if current_index >= len(messages):
+        load_messages()
+
+    LCD1602.clear()
+
+# ================= Polling =================
+def poll_for_messages():
+    global last_poll_time
+    now = time.time()
+
+    if now - last_poll_time >= POLL_INTERVAL:
+        last_poll_time = now
+        load_messages()
+
+# ================= Cleanup =================
+def cleanup(signal_num=None, frame=None):
+    GPIO.output(LED_PIN, LED_OFF)
+    GPIO.cleanup()
+    LCD1602.clear()
+    sys.exit(0)
+
+# ================= Main Loop =================
+def main():
+    setup()
+    load_messages()
+    show_next_page()
+
+    signal.signal(signal.SIGINT, cleanup)
+
+    last_button = GPIO.HIGH
+    last_page_time = time.time()
+
+    while True:
+        now = time.time()
+
+        # ---- Page looping ----
+        if now - last_page_time >= PAGE_DISPLAY_TIME + PAGE_GAP_TIME:
+            show_next_page()
+            last_page_time = now
+
+        # ---- Button handling ----
+        current_button = GPIO.input(BUTTON_PIN)
+
+        if current_button == BUTTON_PRESSED and last_button == GPIO.HIGH:
+            next_message()
+            time.sleep(0.3)  # debounce
+            show_next_page()
+            last_page_time = time.time()
+
+        last_button = current_button
+
+        # ---- Poll Google Sheets ----
+        poll_for_messages()
+
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    main()
